@@ -34,7 +34,57 @@ These questions follow on from Tasks 1 and 1b of the lab.
 - [ ] **Extension:** Which characters appear together most frequently in episodes?
 
 ::: {.solution}
+*Which characters have lines in the most episodes?*
 
+We count the episodes for each `character_id` first, and only then join to `simpsons_characters` to get the names.
+This way the join is done on a small summary table (one row per character) rather than on all 158,255 script lines.
+
+```{r}
+simpsons_script_lines |>
+    group_by(character_id) |>
+    summarise(num_episodes = n_distinct(episode_id), .groups = "drop") |>
+    arrange(desc(num_episodes)) |>
+    inner_join(simpsons_characters, by = c("character_id" = "id")) |>
+    select(character_name, num_episodes) |>
+    head(10)
+```
+
+Notice that grouping by `character_id` also creates a group for `NA`, the scene directions with no character (see Task 1 of the lab).
+This group appears in 564 episodes, tying with Homer for first place!
+The `inner_join` quietly removes it, because `NA` has no match in `simpsons_characters`; with a `left_join` it would appear near the top of the table with no name.
+It would be clearer still to remove it on purpose, with `filter(!is.na(character_id))` before grouping.
+
+*Which characters appear together most frequently in episodes?*
+
+First we make a table with one row for each character in each episode, dropping the scene directions (which have no character):
+
+```{r}
+episode_characters <- simpsons_script_lines |>
+    filter(!is.na(character_id)) |>
+    select(episode_id, character_id) |>
+    distinct()
+```
+
+To find pairs of characters in the same episode, we join this table to *itself* on `episode_id`.
+Each episode has many characters on both sides of the join, so this is a many-to-many join: every character in an episode is matched with every other character in that episode.
+As the notes say, `dplyr` warns about many-to-many joins because they are often a mistake, but here it is exactly what we want, so we say so with `relationship = "many-to-many"`, which also silences the warning.
+
+```{r}
+episode_characters |>
+    inner_join(episode_characters, by = "episode_id", relationship = "many-to-many") |>
+    # both tables have a character_id column, so they get .x and .y suffixes.
+    # Keeping only character_id.x < character_id.y removes each character paired
+    # with themselves, and counts each pair once rather than twice (as A-B and B-A).
+    filter(character_id.x < character_id.y) |>
+    group_by(character_id.x, character_id.y) |>
+    summarise(episodes_together = n(), .groups = "drop") |>
+    # join back to characters twice, to get both names (again with .x and .y suffixes)
+    left_join(simpsons_characters, by = c("character_id.x" = "id")) |>
+    left_join(simpsons_characters, by = c("character_id.y" = "id")) |>
+    select(character_name.x, character_name.y, episodes_together) |>
+    arrange(desc(episodes_together)) |>
+    head(20)
+```
 :::
 
 ### String Processing
@@ -46,7 +96,72 @@ These questions follow on from Task 2 of the lab.
 - [ ] Some location names are written in capitals (e.g. `KITCHEN`) and others are not (e.g. `Simpson Home`). How many are in capitals? Use `str_to_title` to give all the location names consistent capitalisation. Look through the results: does `str_to_title` always give what you want?
 
 ::: {.solution}
+*How many lines contain exclamation marks?*
+```{r}
+simpsons_script_lines |>
+    filter(str_detect(spoken_words, "!")) |>
+    nrow()
+```
 
+*Extension: using a regular expression*
+
+In a regular expression, `|` means "or", so `"donut|doughnut"` matches either word.
+As in the lab, we convert the text to lower case first, so that "Donut" and "DONUTS" are matched too.
+
+```{r}
+simpsons_script_lines |>
+    filter(str_detect(str_to_lower(spoken_words), "donut|doughnut")) |>
+    distinct(episode_id) |>
+    nrow()
+```
+
+A more compact pattern is `"do(ugh)?nut"`: the brackets group `ugh` together, and `?` means "the previous thing is optional", so this matches "donut" and "doughnut".
+
+```{r}
+simpsons_script_lines |>
+    filter(str_detect(str_to_lower(spoken_words), "do(ugh)?nut")) |>
+    distinct(episode_id) |>
+    nrow()
+```
+
+*Tidying the capitalisation of location names*
+
+A name is written in capitals exactly when converting it to upper case leaves it unchanged:
+
+```{r}
+simpsons_locations |>
+    filter(location_name == str_to_upper(location_name)) |>
+    nrow()
+```
+
+That's more than half of the 4,459 locations.
+We can use `str_to_title` to put every name in "title case", and look at a few examples:
+
+```{r}
+simpsons_locations |>
+    mutate(title_name = str_to_title(location_name)) |>
+    filter(location_name %in% c("KITCHEN", "Simpson Home", "TV Studio", "Circus of Values", "NEIGHBOR #1'S HOUSE")) |>
+    select(location_name, title_name)
+```
+
+`str_to_title` simply capitalises the first letter of each word and puts the rest in lower case.
+That works well for `KITCHEN`, but it doesn't know that "TV" is an abbreviation or that short words like "of" are usually left in lower case, and it is confused by the apostrophe in `#1'S`.
+Names that were already sensibly capitalised can be made *worse*.
+One improvement is to convert only the names that are in capitals, using `if_else` (see the Week 2 notes):
+
+```{r}
+simpsons_locations |>
+    mutate(location_name = if_else(
+        location_name == str_to_upper(location_name),
+        str_to_title(location_name),
+        location_name
+    )) |>
+    filter(id %in% c(6, 14)) |>
+    select(id, location_name)
+```
+
+Even so, for names that were entirely in capitals, information such as which words were abbreviations has been lost, and no function can recover it perfectly.
+Automatic cleaning like this is usually good enough for display, but it's worth checking the results rather than assuming they are right.
 :::
 
 ### Dates
@@ -59,7 +174,36 @@ In `simpsons_episodes`, `read_csv` has already recognised `original_air_date` as
 - [ ] How many years ago did the first episode in the data air?
 
 ::: {.solution}
+*Which day of the week did episodes first air?*
 
+```{r}
+simpsons_episodes |>
+    mutate(weekday = format(original_air_date, "%A")) |>
+    count(weekday, sort = TRUE)
+```
+
+Most episodes aired on a Sunday, but 89 aired on a Thursday.
+Counting the Thursday episodes by season shows that they are all from seasons 2 to 5:
+
+```{r}
+simpsons_episodes |>
+    mutate(weekday = format(original_air_date, "%A")) |>
+    filter(weekday == "Thursday") |>
+    count(season)
+```
+
+In fact, The Simpsons moved to Thursday nights between 1990 and 1994, before moving back to Sundays.
+
+*How many years ago did the first episode air?*
+
+```{r}
+first_air_date <- min(simpsons_episodes$original_air_date)
+first_air_date
+interval(first_air_date, today()) |>
+    time_length("years")
+```
+
+This answer depends on the day you run the code, since `today()` changes!
 :::
 
 The next question uses the stock market data from Task 3b of the lab.
@@ -67,5 +211,13 @@ The next question uses the stock market data from Task 3b of the lab.
 - [ ] What is the average trading volume for each month, across all years?
 
 ::: {.solution}
+We group by both the month number and the month name.
+The name makes the output readable, but on its own it would sort the months alphabetically (April, August, December, ...); including the number keeps them in calendar order.
 
+```{r}
+stock_data |>
+    mutate(month = month(date), month_name = format(date, "%B")) |>
+    group_by(month, month_name) |>
+    summarise(mean_volume = mean(volume), .groups = "drop")
+```
 :::

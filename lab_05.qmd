@@ -23,13 +23,40 @@ Note that some columns have been dropped from `simpsons_script_lines` to make th
 - [ ] Load all four of the files
 
 ::: {.solution}
-
+```{r}
+#| message: false
+library(tidyverse)
+simpsons_characters <- read_csv("data/simpsons/simpsons_characters.csv")
+simpsons_episodes <- read_csv("data/simpsons/simpsons_episodes.csv")
+simpsons_locations <- read_csv("data/simpsons/simpsons_locations.csv")
+simpsons_script_lines <- read_csv("data/simpsons/simpsons_script_lines.csv")
+```
 :::
 
 - [ ] Before joining anything, look at the first few rows of each table. What does one row of each table represent? Which columns link the tables together, and would you describe each link as one-to-one, one-to-many or many-to-many?
 
 ::: {.solution}
+```{r}
+head(simpsons_script_lines)
+head(simpsons_characters)
+head(simpsons_locations)
+head(simpsons_episodes)
+```
 
+Each row of `simpsons_script_lines` is one line of a script, and each row of the other three tables is one character, location or episode.
+The script lines table is the "centre" that links the others: its `episode_id`, `character_id` and `location_id` columns refer to the `id` column of `simpsons_episodes`, `simpsons_characters` and `simpsons_locations` respectively.
+The other three tables are not linked to each other directly, so to connect, say, characters to locations, we have to go through the script lines.
+
+Each link is one-to-many: an episode, character or location can appear in many script lines, but each script line has only one of each.
+For this to be true, each `id` must appear only once in its table, which we can check:
+
+```{r}
+n_distinct(simpsons_episodes$id) == nrow(simpsons_episodes)
+n_distinct(simpsons_characters$id) == nrow(simpsons_characters)
+n_distinct(simpsons_locations$id) == nrow(simpsons_locations)
+```
+
+Notice also that some script lines have `NA` for `character_id` or `location_id`; these won't match anything when we join.
 :::
 
 
@@ -40,7 +67,37 @@ Answer the following research questions using `join` functions.
 - [ ] Which episodes feature the most characters? (Hint: look at the `n_distinct` function. Is every script line spoken by a character?)
 
 ::: {.solution}
+*Which character and location pairs have the most lines?*
+```{r}
+simpsons_script_lines |>
+    inner_join(simpsons_locations, by = c("location_id" = "id")) |>
+    inner_join(simpsons_characters, by = c("character_id" = "id")) |>
+    group_by(character_name, location_name) |>
+    summarise(num_lines = n(), .groups = "drop") |>
+    arrange(desc(num_lines))
+```
 
+*Which episodes feature the most characters?*
+
+Not every script line has a character: scene directions such as `(Moe's Tavern: Int. Moe's - evening)` have `character_id` equal to `NA`.
+
+```{r}
+simpsons_script_lines |>
+    filter(is.na(character_id)) |>
+    nrow()
+```
+
+By default `n_distinct` counts `NA` as a distinct value, so every episode would get one extra "character".
+We use `na.rm = TRUE` to ignore the missing values, just as with `mean`:
+
+```{r}
+simpsons_script_lines |>
+    group_by(episode_id) |>
+    summarise(num_characters = n_distinct(character_id, na.rm = TRUE), .groups = "drop") |>
+    inner_join(simpsons_episodes, by = c("episode_id" = "id")) |>
+    select(title, season, number_in_season, num_characters) |>
+    arrange(desc(num_characters))
+```
 :::
 
 ### Task 1b: Choosing a Join
@@ -54,7 +111,56 @@ In this task we look at what that throws away.
 - [ ] In Task 1, we used `inner_join` to find which character and location pairs have the most lines. Was that the right choice?
 
 ::: {.solution}
+*How many rows does each join give?*
 
+```{r}
+nrow(simpsons_script_lines)
+simpsons_script_lines |>
+    inner_join(simpsons_locations, by = c("location_id" = "id")) |>
+    nrow()
+simpsons_script_lines |>
+    left_join(simpsons_locations, by = c("location_id" = "id")) |>
+    nrow()
+```
+
+The `left_join` keeps every script line, but the `inner_join` has 407 fewer rows.
+Each location has a unique `id`, so a script line can match at most one location, and the `inner_join` must have dropped the lines that match *no* location.
+
+*What do the extra rows have in common?*
+
+```{r}
+simpsons_script_lines |>
+    left_join(simpsons_locations, by = c("location_id" = "id")) |>
+    filter(is.na(location_name)) |>
+    select(id, location_id, location_name, raw_text) |>
+    head()
+```
+
+They all have a missing `location_id`, so there is nothing to match them to.
+The `left_join` keeps them, filling `location_name` with `NA`; the `inner_join` silently drops them.
+We could have found these without a join, by filtering on `is.na(location_id)`.
+
+*Which episodes have no script lines?*
+
+`anti_join` keeps the rows of the first table that have *no* match in the second:
+
+```{r}
+simpsons_episodes |>
+    anti_join(simpsons_script_lines, by = c("id" = "episode_id")) |>
+    select(title, season, original_air_date) |>
+    arrange(original_air_date)
+```
+
+There are 36 of them, and almost all are from the last few seasons in the data (26 to 28), so it looks as though the scripts for the most recent episodes were never added.
+This matters for our Task 1 answers: when we joined script lines to episodes, these episodes simply didn't appear.
+Any conclusion about "the episodes" really only applies to the episodes with scripts.
+
+*Was `inner_join` the right choice?*
+
+Yes: the question is about *pairs* of a character and a location, so a line with no character or no location can't contribute to any pair.
+Dropping those lines is exactly what we want.
+But it's worth being aware that it happened: together, the two inner joins dropped almost 18,000 of the 158,255 lines.
+If instead we wanted, say, the total number of lines per character, a line with a missing location should still count, so we should either not join to the locations at all, or use a `left_join`.
 :::
 
 ### Task 2: String Processing
@@ -67,7 +173,70 @@ Answer the following research questions:
 - [ ] In how many episodes are donuts / doughnuts mentioned? (Hint: be careful about capitalisation.)
 
 ::: {.solution}
+*Which episode has the longest line?*
+```{r}
+longest_line <- simpsons_script_lines |>
+    mutate(line_length = str_length(spoken_words)) |>
+    arrange(desc(line_length)) |>
+    head(1) |>
+    inner_join(simpsons_episodes, by = c("episode_id" = "id")) |>
+    select(id, title, line_length, spoken_words)
+longest_line
+```
 
+*Does it look like a single line of dialogue?*
+```{r}
+cat(longest_line$spoken_words)
+```
+
+No: after Homer's line about the self-destruct code there is a newline, followed by what is clearly a *whole row* of a CSV file (`140907,503,143,Robot: ...`).
+Looking at the raw file, the `spoken_words` value for this line starts with a quotation mark (Homer is reading out a code) that is never closed.
+In a CSV file, text inside quotes may contain commas and even newlines, so `read_csv` keeps reading until it finds the next quotation mark, swallowing the following rows into this one value.
+Notice that `read_csv` gave no warning about this: the result has the right number of columns, so `problems(simpsons_script_lines)` is empty.
+Checking the extreme values of a column is a quick way to catch errors like this.
+
+*How many values have this problem? What is the genuine longest line?*
+
+Since each row of a CSV file ends with a newline (`"\n"`), any value containing one is suspicious:
+
+```{r}
+simpsons_script_lines |>
+    filter(str_detect(spoken_words, "\n")) |>
+    nrow()
+```
+
+We remove these and look again.
+(Rows where `spoken_words` is `NA` are also dropped by this `filter`, since `str_detect` returns `NA` for them; that doesn't matter here as they contain no words.)
+
+```{r}
+simpsons_script_lines |>
+    filter(!str_detect(spoken_words, "\n")) |>
+    mutate(line_length = str_length(spoken_words)) |>
+    arrange(desc(line_length)) |>
+    head(1) |>
+    inner_join(simpsons_episodes, by = c("episode_id" = "id")) |>
+    select(title, line_length, spoken_words)
+```
+
+Removing these values hides the damage, but doesn't undo it.
+The rows that were swallowed are not in our data at all: the 22 broken values contain (parts of) 40 other rows, and by removing them we have also thrown away the 22 genuine lines they started with.
+Also, not every broken row contains a newline.
+For example, the row with `id` 152461 has its columns shifted, so its `timestamp_in_ms`, `speaking_line`, `character_id` and `spoken_words` are all `NA`.
+None of this changes our other answers much (it affects around 60 rows out of more than 158,000), but in a real analysis it would be worth repairing the file, or finding a better copy of the data.
+
+*In how many episodes are donuts / doughnuts mentioned?*
+
+Matching with `str_detect` is case-sensitive, so `"donut"` would not match "Donut" or "DONUTS".
+We convert the text to lower case first (without this we would find only 52 episodes).
+A line can mention donuts more than once, and an episode can have many such lines, so we use `distinct(episode_id)` to count each episode once.
+
+```{r}
+simpsons_script_lines |>
+    mutate(lower_words = str_to_lower(spoken_words)) |>
+    filter(str_detect(lower_words, "donut") | str_detect(lower_words, "doughnut")) |>
+    distinct(episode_id) |>
+    nrow()
+```
 :::
 
 ### Task 3a: Parsing Dates
@@ -92,7 +261,43 @@ first_episodes
 - [ ] `excel_date` contains the same dates stored as Excel date numbers. Convert these into dates too. (Hint: see the Week 5 notes.)
 
 ::: {.solution}
+*Converting the text dates*
 
+Each column needs the function that matches the order of its day, month and year:
+
+```{r}
+first_episodes |>
+    mutate(
+        from_uk = dmy(uk_date),
+        from_us = mdy(us_date),
+        from_long = mdy(long_date)
+    ) |>
+    select(title, from_uk, from_us, from_long)
+```
+
+Notice that `mdy` copes with the month written as a word: what matters is the *order* of the parts, not how they are written.
+
+*Using the wrong function*
+
+```{r}
+first_episodes |>
+    mutate(wrong = dmy(us_date)) |>
+    select(title, us_date, wrong)
+```
+
+The first two dates fail to parse, because there is no 17th or 14th month, and `dmy` gives a warning and returns `NA`.
+The last two are much more dangerous: `02/04/1990` is a perfectly valid date when read day-first (2 April 1990), so it is parsed *wrongly*, with no warning at all.
+There is no way to tell from a date like `02/04/1990` alone which format was meant: you need to know where the data came from, and it's worth checking a few dates by hand.
+
+*Converting Excel dates*
+
+```{r}
+#| message: false
+library(janitor)
+first_episodes |>
+    mutate(from_excel = excel_numeric_to_date(excel_date)) |>
+    select(title, excel_date, from_excel)
+```
 :::
 
 ### Task 3b: Date Processing
@@ -119,7 +324,16 @@ It has the following columns:
 - [ ] The column names are not consistently formatted: one of them starts with a capital letter. Use `clean_names` to fix this, and check the new column names.
 
 ::: {.solution}
+`clean_names` is in the `janitor` package, which we loaded in Task 3a.
+We overwrite `stock_data` with the cleaned version, so that we can use the new names from now on:
 
+```{r}
+stock_data <- clean_names(stock_data)
+names(stock_data)
+```
+
+Only `Name` has changed, to `name`.
+With so few columns this would be easy to fix by hand, but `clean_names` is a good habit: it deals with spaces, capitals and punctuation in one step, however many columns there are.
 :::
 
 Answer the following research questions:
@@ -129,7 +343,48 @@ Answer the following research questions:
 - [ ] Why might this day have such a low trading volume?
 
 ::: {.solution}
+*Which day of the year has the lowest trading volume on average?*
+```{r}
+stock_data |>
+    mutate(day_of_year = yday(date)) |>
+    group_by(day_of_year) |>
+    summarise(mean_volume = mean(volume), .groups = "drop") |>
+    arrange(mean_volume) |>
+    head(1)
+```
 
+*Is a given day of the year always the same date?*
+
+No: 2016 is a leap year, so every date after 28 February is one day later in the year than usual.
+
+```{r}
+yday(ymd(c("2015-12-24", "2016-12-24")))
+```
+
+So day 358 is 24 December in most years, but 23 December in 2016, and our answer above mixes up two different dates:
+
+```{r}
+stock_data |>
+    filter(yday(date) == 358) |>
+    distinct(date)
+```
+
+Grouping by month and day avoids this, and also gives an answer that is easier to read:
+
+```{r}
+stock_data |>
+    mutate(month = month(date), day = day(date)) |>
+    group_by(month, day) |>
+    summarise(mean_volume = mean(volume), .groups = "drop") |>
+    arrange(mean_volume) |>
+    head(1)
+```
+
+The answer is still 24 December, but the average volume is noticeably lower once 23 December 2016 is no longer included.
+
+*Why might this day have such a low trading volume?*
+
+24 December is Christmas Eve: US stock markets close early that day, and many traders are on holiday.
 :::
 
 ## Finished? {.unnumbered}
